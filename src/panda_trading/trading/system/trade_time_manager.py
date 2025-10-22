@@ -5,7 +5,7 @@ from panda_backtest.backtest_common.system.context.core_context import CoreConte
 from panda_backtest.backtest_common.data.quotation.quotation_data import QuotationData
 from panda_backtest.backtest_common.system.event.event import ConstantEvent, Event
 from panda_backtest.util.log.remote_log_factory import RemoteLogFactory
-from panda_trading.trading.sub_pub.redis_sub_pub import RedisSubPub
+from panda_trading.trading.sub_pub import get_trade_signal_bus
 from utils.data.data_util import DateUtil
 from utils.log.log_factory import LogFactory
 from utils.time.time_util import TimeUtil
@@ -15,6 +15,7 @@ class TradeTimeManager(object):
         self.quotation_mongo_db = quotation_mongo_db
         self.context = CoreContext.get_instance()
         self.logger = LogFactory.get_logger()
+        self.sub_pub = get_trade_signal_bus()
         self.trade_date = None
         if TimeUtil.in_time_range('200000-235959'):
             self.trade_date = DateUtil.get_next_trade_date(self.now)
@@ -57,10 +58,10 @@ class TradeTimeManager(object):
             ConstantEvent.SYSTEM_RESTORE_STRATEGY)
         event_bus.publish_event(event)
 
-        sub_pub = RedisSubPub()
-        sub_pub.init_sub_trade_signal(run_info.run_id, run_info.account_type, self.handle_trade_sub_mes)
-        sub_pub.init_qry_account(self.qry_account_info)
-        sub_pub.init_check_thread()
+        self.logger.info("交易信号通道: %s", type(self.sub_pub).__name__)
+        self.sub_pub.init_sub_trade_signal(run_info.run_id, run_info.account_type, self.handle_trade_sub_mes)
+        self.sub_pub.init_qry_account(self.qry_account_info)
+        self.sub_pub.init_check_thread()
     # 接收交易信息后，开始执行回调
     def handle_trade_sub_mes(self, ch, method, properties, body):
         try:

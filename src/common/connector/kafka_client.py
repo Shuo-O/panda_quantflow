@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, Mapping, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Union
 
 try:
     from kafka import KafkaConsumer, KafkaProducer  # type: ignore
@@ -138,7 +138,7 @@ class KafkaClientFactory:
 
     def create_consumer(
         self,
-        topic: str,
+        topics: Union[str, Sequence[str]],
         group_id: str,
         **overrides: Any,
     ) -> KafkaConsumer:
@@ -158,7 +158,9 @@ class KafkaClientFactory:
         )
         cfg.update(self.settings.extra_consumer_config)
         cfg.update(overrides)
-        return KafkaConsumer(topic, **cfg)
+        if isinstance(topics, (list, tuple, set)):
+            return KafkaConsumer(*topics, **cfg)
+        return KafkaConsumer(topics, **cfg)
 
     def close(self) -> None:
         with self._producer_lock:

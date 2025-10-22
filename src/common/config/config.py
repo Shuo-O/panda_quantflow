@@ -82,17 +82,34 @@ def load_config():
     config["KAFKA_FUTURE_TICK_OFFSET_RESET"] = os.getenv(
         "KAFKA_FUTURE_TICK_OFFSET_RESET", "latest"
     )
+    config["KAFKA_ENABLE_TRADE_SIGNAL"] = os.getenv(
+        "KAFKA_ENABLE_TRADE_SIGNAL", "false"
+    )
+    config["KAFKA_TRADE_SIGNAL_TOPIC_PREFIX"] = os.getenv(
+        "KAFKA_TRADE_SIGNAL_TOPIC_PREFIX", "trade.signal"
+    )
+    config["KAFKA_TRADE_SIGNAL_GROUP_PREFIX"] = os.getenv(
+        "KAFKA_TRADE_SIGNAL_GROUP_PREFIX", "trade-signal-consumer"
+    )
 
     # QuestDB
-    # temp！！！！！！
-    # config["QUESTDB_ENABLE"] = os.getenv("QUESTDB_ENABLE", "false"）
-    config["QUESTDB_ENABLE"] =  "true"# temp！！！！！！
+    config["QUESTDB_ENABLE"] = os.getenv("QUESTDB_ENABLE", "true")
     config["QUESTDB_HOST"] = os.getenv("QUESTDB_HOST", "localhost")
     config["QUESTDB_ILP_PORT"] = int(os.getenv("QUESTDB_ILP_PORT", "9009"))
     config["QUESTDB_HTTP_PORT"] = int(os.getenv("QUESTDB_HTTP_PORT", "9000"))
     config["QUESTDB_USERNAME"] = os.getenv("QUESTDB_USERNAME", "")
     config["QUESTDB_PASSWORD"] = os.getenv("QUESTDB_PASSWORD", "")
     config["QUESTDB_TICK_TABLE"] = os.getenv("QUESTDB_TICK_TABLE", "future_ticks")
+
+    # ClickHouse
+    config["CLICKHOUSE_ENABLE"] = os.getenv("CLICKHOUSE_ENABLE", "false")
+    config["CLICKHOUSE_HOST"] = os.getenv("CLICKHOUSE_HOST", "localhost")
+    config["CLICKHOUSE_HTTP_PORT"] = int(os.getenv("CLICKHOUSE_HTTP_PORT", "8123"))
+    config["CLICKHOUSE_DATABASE"] = os.getenv("CLICKHOUSE_DATABASE", "default")
+    config["CLICKHOUSE_USERNAME"] = os.getenv("CLICKHOUSE_USERNAME", "")
+    config["CLICKHOUSE_PASSWORD"] = os.getenv("CLICKHOUSE_PASSWORD", "")
+    config["CLICKHOUSE_TICK_TABLE"] = os.getenv("CLICKHOUSE_TICK_TABLE", "future_ticks")
+    config["CLICKHOUSE_TIMEOUT"] = float(os.getenv("CLICKHOUSE_TIMEOUT", "2.0"))
 
     return config
 

@@ -23,6 +23,7 @@ from panda_backtest.backtest_common.data.future.future_info_map import FutureInf
 from panda_backtest.backtest_common.model.quotation.bar_quotation_data import BarQuotationData
 from common.connector.kafka_client import KafkaClientFactory, KafkaSettings
 from common.connector.questdb_client import QuestDBClient
+from common.connector.clickhouse_client import ClickHouseClient
 from common.connector.mongodb_handler import DatabaseHandler as MongoClient
 from common.connector.redis_client import RedisClient
 from panda_trading.trading.util.symbol_util import SymbolUtil
@@ -64,6 +65,7 @@ class MdSpi(ctp.CThostFtdcMdSpi):
         self._kafka_error_logged = False
         self._kafka_ready_logged = False
         self._questdb_client = QuestDBClient.instance()
+        self._clickhouse_client = ClickHouseClient.instance()
         self._init_kafka()
 
     @staticmethod
@@ -125,6 +127,33 @@ class MdSpi(ctp.CThostFtdcMdSpi):
             self._questdb_client.write_tick(bar_quotation_data.symbol, fields, timestamp_ns)
         except Exception as exc:
             self.logger.debug("[QuestDB] 写入失败: %s", exc)
+        self._publish_clickhouse_tick(bar_quotation_data)
+
+    def _publish_clickhouse_tick(self, bar_quotation_data: BarQuotationData) -> None:
+        if not self._clickhouse_client or not bar_quotation_data.symbol:
+            return
+        try:
+            now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S.%f")
+            row = {
+                "timestamp": now,
+                "symbol": bar_quotation_data.symbol,
+                "last": bar_quotation_data.last,
+                "open": bar_quotation_data.open,
+                "high": bar_quotation_data.high,
+                "low": bar_quotation_data.low,
+                "close": bar_quotation_data.close,
+                "volume": bar_quotation_data.volume,
+                "turnover": bar_quotation_data.turnover,
+                "oi": bar_quotation_data.oi,
+                "askprice1": bar_quotation_data.askprice1,
+                "bidprice1": bar_quotation_data.bidprice1,
+                "askvolume1": bar_quotation_data.askvolume1,
+                "bidvolume1": bar_quotation_data.bidvolume1,
+                "settle": bar_quotation_data.settle,
+            }
+            self._clickhouse_client.write_tick(row)
+        except Exception as exc:
+            self.logger.debug("[ClickHouse] 写入失败: %s", exc)
 
     def create(self):
         dir = ''.join(('ctp', self.broker_id, self.user_id)).encode('UTF-8')

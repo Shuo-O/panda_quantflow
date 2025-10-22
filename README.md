@@ -51,9 +51,11 @@
 | 组件 | 默认配置 | 说明 |
 | ---- | ---- | ---- |
 | Kafka | `KAFKA_ENABLE_FUTURE_TICK=true` 时启用，Topic 默认为 `market.future.tick` | 行情采集端将 Tick 同步写入 Redis 与 Kafka，消费端按需订阅，多进程解耦。 |
+| Kafka 信号 | `KAFKA_ENABLE_TRADE_SIGNAL=true` 时启用，Topic 前缀 `KAFKA_TRADE_SIGNAL_TOPIC_PREFIX` | 交易信号可从 Redis 切换到 Kafka，`trade.signal.<future|stock>`、`trade.signal.risk_reload_<run_id>`。 |
 | QuestDB | `QUESTDB_ENABLE=true` 时启用，表名默认为 `future_ticks` | Tick 会通过 ILP 协议写入 QuestDB；若 Kafka/Redis 缓存缺失，读取器会自动从 QuestDB 回补最近一条。 |
-| 验证 | `tail -f logs/panda_info.log` 查看 `[Kafka]`、`[QuestDB]` 日志；也可使用 Kafka CLI、QuestDB Web Console/HTTP API 校验数据落库情况。 |
-| 测试脚本 | `python tools/publish_sample_tick.py --symbol TEST.FUT --price 101.5` | 开发环境下快速向 Kafka/QuestDB 写入一条测试 Tick，便于确认链路。 |
+| ClickHouse | `CLICKHOUSE_ENABLE=true` 时启用，表名默认为 `future_ticks` | Tick 通过 HTTP `JSONEachRow` 写入 ClickHouse，适合做批量分析与 OLAP 查询。 |
+| 验证 | `tail -f logs/panda_info.log` 查看 `[Kafka]`、`[QuestDB]`、`[ClickHouse]` 日志；也可使用 Kafka CLI、QuestDB/ClickHouse HTTP 接口校验数据落库情况。 |
+| 测试脚本 | `python tools/publish_sample_tick.py --symbol TEST.FUT --price 101.5` | 开发环境下快速向 Kafka / QuestDB / ClickHouse 写入一条测试 Tick，便于确认链路。 |
 
 
 ## 已规划功能，欢迎加群内测
