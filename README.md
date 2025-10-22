@@ -55,7 +55,8 @@
 | QuestDB | `QUESTDB_ENABLE=true` 时启用，表名默认为 `future_ticks` | Tick 会通过 ILP 协议写入 QuestDB；若 Kafka/Redis 缓存缺失，读取器会自动从 QuestDB 回补最近一条。 |
 | ClickHouse | `CLICKHOUSE_ENABLE=true` 时启用，表名默认为 `future_ticks` | Tick 通过 HTTP `JSONEachRow` 写入 ClickHouse，适合做批量分析与 OLAP 查询。 |
 | 验证 | `tail -f logs/panda_info.log` 查看 `[Kafka]`、`[QuestDB]`、`[ClickHouse]` 日志；也可使用 Kafka CLI、QuestDB/ClickHouse HTTP 接口校验数据落库情况。 |
-| 测试脚本 | `python tools/publish_sample_tick.py --symbol TEST.FUT --price 101.5` | 开发环境下快速向 Kafka / QuestDB / ClickHouse 写入一条测试 Tick，便于确认链路。 |
+| 测试脚本 | `python tools/publish_sample_tick.py --symbol TEST.FUT --price 101.5` | 向 Kafka / QuestDB / ClickHouse 写入测试 Tick，便于确认链路。 |
+| 性能采集 | `python tools/collect_metrics.py --messages 500` | 统计 Kafka 平均/分位延迟，并可测试 QuestDB、ClickHouse 查询耗时。 |
 
 
 ## 已规划功能，欢迎加群内测

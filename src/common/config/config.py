@@ -58,7 +58,7 @@ def load_config():
     config["KAFKA_CLIENT_ID"] = os.getenv("KAFKA_CLIENT_ID", "panda-quantflow")
     config["KAFKA_ENABLE_IDEMPOTENCE"] = os.getenv("KAFKA_ENABLE_IDEMPOTENCE", "false")
     config["KAFKA_REQUEST_TIMEOUT_MS"] = int(
-        os.getenv("KAFKA_REQUEST_TIMEOUT_MS", "30000")
+        os.getenv("KAFKA_REQUEST_TIMEOUT_MS", "60000")
     )
     config["KAFKA_SESSION_TIMEOUT_MS"] = int(
         os.getenv("KAFKA_SESSION_TIMEOUT_MS", "45000")
