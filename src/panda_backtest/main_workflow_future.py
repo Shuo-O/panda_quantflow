@@ -92,7 +92,7 @@ def start(code:str,start_future_capital:int,future_account_id:str,start_date:str
     return back_test_id
 if __name__ == '__main__':
     strategy_code_default = '''
-    from panda_backtest.system.panda_log import SRLogger
+    fworom panda_backtest.system.panda_log import SRLogger
     from panda_backtest.api.api import *
     import pandas as pd
     import numpy as np

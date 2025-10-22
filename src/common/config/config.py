@@ -47,6 +47,53 @@ def load_config():
     config["MYSQL_PASSWORD"] = os.getenv("MYSQL_PASSWORD", "qweqwe")
     config["MYSQL_DATABASE"] = os.getenv("MYSQL_DATABASE", "pandaai_test")
 
+    # Kafka
+    config["KAFKA_BOOTSTRAP_SERVERS"] = os.getenv(
+        "KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"
+    )
+    config["KAFKA_SECURITY_PROTOCOL"] = os.getenv("KAFKA_SECURITY_PROTOCOL", "PLAINTEXT")
+    config["KAFKA_SASL_MECHANISM"] = os.getenv("KAFKA_SASL_MECHANISM", "")
+    config["KAFKA_SASL_USERNAME"] = os.getenv("KAFKA_SASL_USERNAME", "")
+    config["KAFKA_SASL_PASSWORD"] = os.getenv("KAFKA_SASL_PASSWORD", "")
+    config["KAFKA_CLIENT_ID"] = os.getenv("KAFKA_CLIENT_ID", "panda-quantflow")
+    config["KAFKA_ENABLE_IDEMPOTENCE"] = os.getenv("KAFKA_ENABLE_IDEMPOTENCE", "false")
+    config["KAFKA_REQUEST_TIMEOUT_MS"] = int(
+        os.getenv("KAFKA_REQUEST_TIMEOUT_MS", "30000")
+    )
+    config["KAFKA_SESSION_TIMEOUT_MS"] = int(
+        os.getenv("KAFKA_SESSION_TIMEOUT_MS", "45000")
+    )
+    config["KAFKA_FUTURE_TICK_TOPIC"] = os.getenv(
+        "KAFKA_FUTURE_TICK_TOPIC", "market.future.tick"
+    )
+    # temp！！！！！！
+    # config["KAFKA_ENABLE_FUTURE_TICK"] = os.getenv(
+    #     "KAFKA_ENABLE_FUTURE_TICK", "false"
+    #     "true"
+    # )
+    config["KAFKA_ENABLE_FUTURE_TICK"] = os.getenv(
+        # "KAFKA_ENABLE_FUTURE_TICK", "false"
+        "true"
+    )
+    # temp！！！！！！
+    config["KAFKA_FUTURE_TICK_GROUP_ID"] = os.getenv(
+        "KAFKA_FUTURE_TICK_GROUP_ID", "panda-future-tick-consumer"
+    )
+    config["KAFKA_FUTURE_TICK_OFFSET_RESET"] = os.getenv(
+        "KAFKA_FUTURE_TICK_OFFSET_RESET", "latest"
+    )
+
+    # QuestDB
+    # temp！！！！！！
+    # config["QUESTDB_ENABLE"] = os.getenv("QUESTDB_ENABLE", "false"）
+    config["QUESTDB_ENABLE"] =  "true"# temp！！！！！！
+    config["QUESTDB_HOST"] = os.getenv("QUESTDB_HOST", "localhost")
+    config["QUESTDB_ILP_PORT"] = int(os.getenv("QUESTDB_ILP_PORT", "9009"))
+    config["QUESTDB_HTTP_PORT"] = int(os.getenv("QUESTDB_HTTP_PORT", "9000"))
+    config["QUESTDB_USERNAME"] = os.getenv("QUESTDB_USERNAME", "")
+    config["QUESTDB_PASSWORD"] = os.getenv("QUESTDB_PASSWORD", "")
+    config["QUESTDB_TICK_TABLE"] = os.getenv("QUESTDB_TICK_TABLE", "future_ticks")
+
     return config
 
 

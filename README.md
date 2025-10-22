@@ -46,6 +46,15 @@
 - **工作流支持json导入导出**：通过json文件快速传播和复现工作流
 - **容器化部署**：支持Docker和Docker Compose快速部署
 
+### ⚡ 实时数据管线
+
+| 组件 | 默认配置 | 说明 |
+| ---- | ---- | ---- |
+| Kafka | `KAFKA_ENABLE_FUTURE_TICK=true` 时启用，Topic 默认为 `market.future.tick` | 行情采集端将 Tick 同步写入 Redis 与 Kafka，消费端按需订阅，多进程解耦。 |
+| QuestDB | `QUESTDB_ENABLE=true` 时启用，表名默认为 `future_ticks` | Tick 会通过 ILP 协议写入 QuestDB；若 Kafka/Redis 缓存缺失，读取器会自动从 QuestDB 回补最近一条。 |
+| 验证 | `tail -f logs/panda_info.log` 查看 `[Kafka]`、`[QuestDB]` 日志；也可使用 Kafka CLI、QuestDB Web Console/HTTP API 校验数据落库情况。 |
+| 测试脚本 | `python tools/publish_sample_tick.py --symbol TEST.FUT --price 101.5` | 开发环境下快速向 Kafka/QuestDB 写入一条测试 Tick，便于确认链路。 |
+
 
 ## 已规划功能，欢迎加群内测
 LLM支持

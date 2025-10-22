@@ -13,17 +13,20 @@ import ctp
 import ctp as mdapi
 import time
 import traceback
+import logging
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from typing import Optional
 
-from common.config.config import config
+from common.config.config import config, get_config
 from panda_backtest.backtest_common.data.future.future_info_map import FutureInfoMap
 from panda_backtest.backtest_common.model.quotation.bar_quotation_data import BarQuotationData
+from common.connector.kafka_client import KafkaClientFactory, KafkaSettings
+from common.connector.questdb_client import QuestDBClient
 from common.connector.mongodb_handler import DatabaseHandler as MongoClient
 from common.connector.redis_client import RedisClient
 from panda_trading.trading.util.symbol_util import SymbolUtil
 from utils.data.data_util import DateUtil
-from utils.thread.thread_util import ThreadUtil
 from utils.time.time_util import TimeUtil
 
 
@@ -31,6 +34,7 @@ class MdSpi(ctp.CThostFtdcMdSpi):
     def __init__(self, front, broker_id, user_id, password):
         ctp.CThostFtdcMdSpi.__init__(self)
 
+        self.logger = logging.getLogger(__name__)
         self.front = front
         self.broker_id = broker_id
         self.user_id = user_id
@@ -52,7 +56,75 @@ class MdSpi(ctp.CThostFtdcMdSpi):
         self.now_trade_date_tuple = (datetime.now().strftime('%Y%m%d'),
                                      DateUtil.get_next_trade_date(datetime.now().strftime('%Y%m%d')))
         self.executor = ThreadPoolExecutor(max_workers=10)
+        self._kafka_factory: Optional[KafkaClientFactory] = None
+        self._kafka_producer = None
+        self._kafka_future_tick_topic = self._get_config_value(
+            "KAFKA_FUTURE_TICK_TOPIC", "market.future.tick"
+        )
+        self._kafka_error_logged = False
+        self._kafka_ready_logged = False
+        self._questdb_client = QuestDBClient.instance()
+        self._init_kafka()
 
+    @staticmethod
+    def _get_config_value(key: str, default: str) -> str:
+        cfg = get_config()
+        return os.getenv(key, cfg.get(key, default))
+
+    def _init_kafka(self):
+        try:
+            settings = KafkaSettings.from_env()
+            if settings.is_configured():
+                self._kafka_factory = KafkaClientFactory(settings)
+                self._kafka_producer = self._kafka_factory.get_producer()
+                if not self._kafka_ready_logged:
+                    self.logger.info(
+                        "[Kafka] Future tick producer ready, topic=%s, bootstrap=%s",
+                        self._kafka_future_tick_topic,
+                        settings.bootstrap_servers,
+                    )
+                    self._kafka_ready_logged = True
+        except Exception as exc:
+            if not self._kafka_error_logged:
+                self.logger.error("[Kafka] 初始化失败: %s", exc)
+                self._kafka_error_logged = True
+            self._kafka_factory = None
+            self._kafka_producer = None
+
+    def _publish_kafka_tick(self, bar_quotation_data: BarQuotationData) -> None:
+        if not self._kafka_producer:
+            return
+        try:
+            payload = json.dumps(bar_quotation_data.__dict__).encode("utf-8")
+            self._kafka_producer.send(self._kafka_future_tick_topic, payload)
+        except Exception as exc:
+            if not self._kafka_error_logged:
+                self.logger.error("[Kafka] 推送行情失败: %s", exc)
+                self._kafka_error_logged = True
+
+    def _publish_questdb_tick(self, bar_quotation_data: BarQuotationData) -> None:
+        if not self._questdb_client or not bar_quotation_data.symbol:
+            return
+        try:
+            timestamp_ns = time.time_ns()
+            fields = {
+                "last": bar_quotation_data.last,
+                "open": bar_quotation_data.open,
+                "high": bar_quotation_data.high,
+                "low": bar_quotation_data.low,
+                "close": bar_quotation_data.close,
+                "volume": bar_quotation_data.volume,
+                "turnover": bar_quotation_data.turnover,
+                "oi": bar_quotation_data.oi,
+                "askprice1": bar_quotation_data.askprice1,
+                "bidprice1": bar_quotation_data.bidprice1,
+                "askvolume1": bar_quotation_data.askvolume1,
+                "bidvolume1": bar_quotation_data.bidvolume1,
+                "settle": bar_quotation_data.settle,
+            }
+            self._questdb_client.write_tick(bar_quotation_data.symbol, fields, timestamp_ns)
+        except Exception as exc:
+            self.logger.debug("[QuestDB] 写入失败: %s", exc)
 
     def create(self):
         dir = ''.join(('ctp', self.broker_id, self.user_id)).encode('UTF-8')
@@ -76,20 +148,20 @@ class MdSpi(ctp.CThostFtdcMdSpi):
         self.api.ReqUserLogin(field, self.request_id)
 
     def OnFrontConnected(self):
-        print("OnFrontConnected")
+        self.logger.info("CTP 前置已连接")
         self.connected = True
         self.login()
 
     def OnRspUserLogin(self, pRspUserLogin:'CThostFtdcRspUserLoginField', pRspInfo:'CThostFtdcRspInfoField', nRequestID:'int', bIsLast:'bool'):
-        print("OnRspUserLogin", pRspInfo.ErrorID, pRspInfo.ErrorMsg)
+        self.logger.info("OnRspUserLogin %s %s", pRspInfo.ErrorID, pRspInfo.ErrorMsg)
         if pRspInfo.ErrorID == 0:
             self.loggedin = True
 
     def OnRspError(self, pRspInfo:'CThostFtdcRspInfoField', nRequestID:'int', bIsLast:'bool'):
-        print("OnRspError:", pRspInfo.ErrorID, pRspInfo.ErrorMsg)
+        self.logger.error("OnRspError: %s %s", pRspInfo.ErrorID, pRspInfo.ErrorMsg)
 
     def OnRspSubMarketData(self, pSpecificInstrument: 'CThostFtdcSpecificInstrumentField', pRspInfo: 'CThostFtdcRspInfoField', nRequestID: 'int', bIsLast: 'bool'):
-        print("OnRspSubMarketData:", pRspInfo.ErrorID, pRspInfo.ErrorMsg)
+        self.logger.info("OnRspSubMarketData: %s %s", pRspInfo.ErrorID, pRspInfo.ErrorMsg)
         if pRspInfo.ErrorID == 0:
             self.subscribed = True
 
@@ -97,37 +169,40 @@ class MdSpi(ctp.CThostFtdcMdSpi):
         """
         收到行情推送时的回调函数
         """
-        print("【行情推送】已触发！")
-        print(f"合约ID: {pDepthMarketData.InstrumentID}")
-        print(f"最新价: {pDepthMarketData.LastPrice}")
-        print(f"买一价: {pDepthMarketData.BidPrice1}, 卖一价: {pDepthMarketData.AskPrice1}")
+        self.logger.debug(
+            "Tick %s last=%s bid1=%s ask1=%s",
+            pDepthMarketData.InstrumentID,
+            pDepthMarketData.LastPrice,
+            pDepthMarketData.BidPrice1,
+            pDepthMarketData.AskPrice1,
+        )
         self.data = pDepthMarketData
         # self.save_data_task(pDepthMarketData)
         try:
             self.executor.submit(self.save_data_task, pDepthMarketData)
         except Exception as e:
-            print("❌ 行情推送异常:", str(e))
+            self.logger.exception("行情推送任务提交失败: %s", e)
 
 
     def save_data_task(self, tick_data):
         try:
             if tick_data is None:
-                print('数据为空')
+                self.logger.warning('行情推送数据为空')
                 return
             bar_quotation_data = self.depth_market_dat_to_symbol(tick_data)
             if bar_quotation_data is None:
                 return
             key = bar_quotation_data.symbol
-            print("********+"+key)
             self.__redis_client.setHashRedis('tushare_future_tick_quotation', key,
                                              json.dumps(bar_quotation_data.__dict__))
+            self._publish_kafka_tick(bar_quotation_data)
+            self._publish_questdb_tick(bar_quotation_data)
         except Exception as e:
             mes = traceback.format_exc()
-            print(mes)
+            self.logger.exception("保存行情数据异常: %s", mes)
 
     def depth_market_dat_to_symbol(self, tick_data):
         try:
-            print("depth_market_dat_to_symbol:" + tick_data.InstrumentID)
             bar_quotation_data = BarQuotationData()
             symbol_info = self.future_info_map.get_by_ctp_code(tick_data.InstrumentID)
             if symbol_info:
@@ -163,7 +238,7 @@ class MdSpi(ctp.CThostFtdcMdSpi):
             else:
                 # 如果没有找到 '.'，可以设置默认值或处理异常情况
                 exchange = None  # 或者 raise ValueError 或者使用其他默认逻辑
-                print(f"Warning: Invalid symbol format - {bar_quotation_data.symbol}")
+                self.logger.warning("Invalid symbol format %s", bar_quotation_data.symbol)
             if exchange == 'CZC':
                 if TimeUtil.in_time_range('210000-235959'):
                     if datetime.now().strftime('%Y%m%d') == self.now_trade_date_tuple[0]:
@@ -184,7 +259,7 @@ class MdSpi(ctp.CThostFtdcMdSpi):
             return bar_quotation_data
         except Exception as e:
             mes = traceback.format_exc()
-            print('depth_market_dat_to_symbol异常：' + str(mes))
+            self.logger.exception('depth_market_dat_to_symbol异常：%s', mes)
             return None
 
     def __del__(self):
