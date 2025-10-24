@@ -102,7 +102,8 @@ def load_config():
     config["QUESTDB_TICK_TABLE"] = os.getenv("QUESTDB_TICK_TABLE", "future_ticks")
 
     # ClickHouse
-    config["CLICKHOUSE_ENABLE"] = os.getenv("CLICKHOUSE_ENABLE", "false")
+    # config["CLICKHOUSE_ENABLE"] = os.getenv("CLICKHOUSE_ENABLE", "false")
+    config["CLICKHOUSE_ENABLE"] = "true"
     config["CLICKHOUSE_HOST"] = os.getenv("CLICKHOUSE_HOST", "localhost")
     config["CLICKHOUSE_HTTP_PORT"] = int(os.getenv("CLICKHOUSE_HTTP_PORT", "8123"))
     config["CLICKHOUSE_DATABASE"] = os.getenv("CLICKHOUSE_DATABASE", "default")

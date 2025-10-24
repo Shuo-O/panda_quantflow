@@ -56,6 +56,7 @@
 | ClickHouse | `CLICKHOUSE_ENABLE=true` 时启用，表名默认为 `future_ticks` | Tick 通过 HTTP `JSONEachRow` 写入 ClickHouse，适合做批量分析与 OLAP 查询。 |
 | 验证 | `tail -f logs/panda_info.log` 查看 `[Kafka]`、`[QuestDB]`、`[ClickHouse]` 日志；也可使用 Kafka CLI、QuestDB/ClickHouse HTTP 接口校验数据落库情况。 |
 | 测试脚本 | `python tools/publish_sample_tick.py --symbol TEST.FUT --price 101.5` | 向 Kafka / QuestDB / ClickHouse 写入测试 Tick，便于确认链路。 |
+| 性能对比 | `python tools/benchmark_publish_sample_tick.py --symbol TEST.FUT --price 101.5 --count 100` | 对比调优前后写入吞吐，评估批量调用收益。 |
 | 性能采集 | `python tools/collect_metrics.py --messages 500` | 统计 Kafka 平均/分位延迟，并可测试 QuestDB、ClickHouse 查询耗时。 |
 
 
