@@ -35,7 +35,7 @@ def load_config():
     config["REDIS_HOST"] = os.getenv("REDIS_HOST", "localhost")
     config["REDIS_PORT"] = int(os.getenv("REDIS_PORT", 6379))
     config["REDIS_DB"] = int(os.getenv("REDIS_DB", 0))
-    config["REDIS_PASSWORD"] = os.getenv("REDIS_PASSWORD", "123456")
+    config["REDIS_PASSWORD"] = os.getenv("REDIS_PASSWORD", "")
     config["REDIS_MAX_CONNECTIONS"] = int(os.getenv("REDIS_MAX_CONNECTIONS", 10))
     config["REDIS_SOCKET_TIMEOUT"] = int(os.getenv("REDIS_SOCKET_TIMEOUT", 5))
     config["REDIS_CONNECT_TIMEOUT"] = int(os.getenv("REDIS_CONNECT_TIMEOUT", 5))
