@@ -10,7 +10,7 @@ def main():
     #     'risk_control_name': '本地风控',
     #     'risk_control_id': 332,
     # }]
-    handle_message = {'file': '/Users/peiqi/code/python/panda_workflow/src/panda_backtest/strategy/factor02.py',
+    handle_message = {'file': 'strategy/future01.py',
     # handle_message = {'file': '/Users/peiqi/code/python/panda_workflow/src/panda_backtest/strategy/ase.py',
                       'run_params': 'no_opz',
                       'start_capital': 10000000,

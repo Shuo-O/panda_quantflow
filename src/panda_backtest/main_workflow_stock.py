@@ -85,7 +85,7 @@ def start(back_test_id:str,code:str,start_date:str,end_date:str, start_capital: 
     # global_args = FileStrategyLoader(handle_message['file'], True).load(global_args)
     handle_message['strategy_id'] = 1
     extension_module = import_module("panda_backtest.extensions.trade_reverse_future")
-    extension = extension_module.load_extension()
+    extension = extension_module.load_extension(handle_message.get('data_source'))
     extension.create(_context)
     Strategy(global_args, _context.event_bus)
 

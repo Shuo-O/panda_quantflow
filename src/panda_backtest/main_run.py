@@ -101,7 +101,7 @@ def main_run(kwargs=None):
 
     # 根据情况，加载对应扩展
     extension_module = import_module("panda_backtest.extensions.trade_reverse_future")
-    extension = extension_module.load_extension()
+    extension = extension_module.load_extension(kwargs.get('data_source'))
     extension.create(_context)
 
     # 初始化

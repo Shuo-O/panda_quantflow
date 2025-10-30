@@ -73,7 +73,7 @@ def start(code:str,start_future_capital:int,future_account_id:str,start_date:str
         code, False).load(global_args)
     handle_message['strategy_id'] = 1
     extension_module = import_module("panda_backtest.extensions.trade_reverse_future")
-    extension = extension_module.load_extension()
+    extension = extension_module.load_extension(handle_message.get('data_source'))
     extension.create(_context)
     Strategy(global_args, _context.event_bus)
 
@@ -121,5 +121,4 @@ if __name__ == '__main__':
     '''.strip()
     print('进程id' + str(os.getpid()))
     start(code=strategy_code_default, start_future_capital=100000, future_account_id='000001',start_date='20250101',end_date='20250201')
-
 
