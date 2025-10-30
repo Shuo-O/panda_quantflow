@@ -23,7 +23,7 @@ import argparse
 import datetime as dt
 import math
 import time
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, Iterator, List, Optional
 
 from common.config.config import get_config
 from common.connector.mongodb_handler import DatabaseHandler
@@ -48,12 +48,20 @@ FLOAT_FIELDS = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sync bar data from MongoDB to QuestDB.")
-    parser.add_argument("--collection", required=True, help="MongoDB collection name (e.g. stock_market).")
+    parser.add_argument(
+        "--collection",
+        required=True,
+        help="MongoDB collection name (e.g. stock_market).",
+    )
     parser.add_argument(
         "--symbols",
         nargs="+",
-        required=True,
         help="Symbols to export (e.g. 000001.SH). Multiple symbols separated by space.",
+    )
+    parser.add_argument(
+        "--all-symbols",
+        action="store_true",
+        help="Export every distinct symbol found in the collection.",
     )
     parser.add_argument("--start-date", required=True, help="Start date YYYYMMDD (inclusive).")
     parser.add_argument("--end-date", required=True, help="End date YYYYMMDD (inclusive).")
@@ -90,12 +98,28 @@ def parse_args() -> argparse.Namespace:
         help="Print what would be written without sending to QuestDB.",
     )
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1000,
+        help="Cursor batch size when reading from Mongo (default: 1000).",
+    )
+    parser.add_argument(
         "--sleep",
         type=float,
         default=0.0,
         help="Sleep seconds between QuestDB writes (useful to throttle).",
     )
     return parser.parse_args()
+
+
+def distinct_symbols(
+    db: DatabaseHandler, mongo_db: str, collection: str, symbol_field: str
+) -> List[str]:
+    coll = db.get_mongo_collection(mongo_db, collection)
+    symbols = coll.distinct(symbol_field)
+    symbols = sorted(sym for sym in symbols if sym)
+    print(f"[INFO] Found {len(symbols)} distinct symbols in {collection}.")
+    return symbols
 
 
 def _parse_trade_date(value, date_type: str) -> dt.datetime:
@@ -145,7 +169,7 @@ def _build_ilp_line(table: str, symbol: str, fields: Dict[str, Optional[float]],
     return f"{table},symbol={symbol} {fields_str} {timestamp_ns}\n"
 
 
-def fetch_documents(
+def iter_documents(
     db: DatabaseHandler,
     mongo_db: str,
     collection: str,
@@ -154,19 +178,32 @@ def fetch_documents(
     date_field: str,
     start_value,
     end_value,
-    max_docs: int = 0,
-) -> List[Dict]:
-    query: Dict[str, object] = {symbol_field: symbol}
-    query[date_field] = {"$gte": start_value, "$lte": end_value}
-    sort = [(date_field, 1)]
-    docs = db.mongo_find(mongo_db, collection, query, sort=sort)
-    if max_docs and len(docs) > max_docs:
-        return docs[:max_docs]
-    return docs
+    max_docs: int,
+    batch_size: int,
+) -> Iterator[Dict]:
+    coll = db.get_mongo_collection(mongo_db, collection)
+    query = {
+        symbol_field: symbol,
+        date_field: {"$gte": start_value, "$lte": end_value},
+    }
+    cursor = (
+        coll.find(query)
+        .sort(date_field, 1)
+        .batch_size(batch_size if batch_size > 0 else 0)
+    )
+    count = 0
+    for doc in cursor:
+        yield doc
+        count += 1
+        if max_docs and count >= max_docs:
+            break
 
 
 def main():
     args = parse_args()
+    if not args.all_symbols and not args.symbols:
+        raise SystemExit("必须指定 --symbols 或 --all-symbols 之一。")
+
     config = get_config()
     mongo_db_name = config["MONGO_DB"]
     db_handler = DatabaseHandler(config)
@@ -177,9 +214,17 @@ def main():
     start_value = int(args.start_date) if args.date_type == "int" else args.start_date
     end_value = int(args.end_date) if args.date_type == "int" else args.end_date
 
+    if args.all_symbols:
+        symbol_list = distinct_symbols(
+            db_handler, mongo_db_name, args.collection, args.symbol_field
+        )
+    else:
+        symbol_list = args.symbols
+
     total_written = 0
-    for symbol in args.symbols:
-        docs = fetch_documents(
+    for symbol in symbol_list:
+        print(f"[INFO] 准备写入 {symbol} 数据.")
+        generator = iter_documents(
             db_handler,
             mongo_db_name,
             args.collection,
@@ -188,14 +233,12 @@ def main():
             args.date_field,
             start_value,
             end_value,
-            max_docs=args.max_documents,
+            args.max_documents,
+            args.batch_size,
         )
-        if not docs:
-            print(f"[WARN] 未找到 {symbol} 在 {args.collection} 中的数据.")
-            continue
 
-        print(f"[INFO] 准备写入 {symbol} 数据，共 {len(docs)} 条.")
-        for doc in docs:
+        row_count = 0
+        for doc in generator:
             trade_raw = doc.get(args.date_field)
             if trade_raw is None:
                 print(f"[WARN] 文档缺少 {args.date_field}: {doc}")
@@ -214,13 +257,21 @@ def main():
                 print(f"[WARN] 跳过 {symbol} {trade_raw}: {exc}")
                 continue
 
+            row_count += 1
             if args.dry_run:
-                print(line)
+                print(line.rstrip())
             else:
                 quest_client.write_line(line)
                 total_written += 1
+                if row_count % 1000 == 0:
+                    print(f"[INFO] {symbol} 已写入 {row_count} 条.")
                 if args.sleep:
                     time.sleep(args.sleep)
+
+        if row_count == 0:
+            print(f"[WARN] 未找到 {symbol} 在 {args.collection} 中的数据.")
+        else:
+            print(f"[INFO] {symbol} 写入完成，共 {row_count} 条.")
 
     print(f"[DONE] 共处理写入 {total_written} 条记录（dry-run={args.dry_run}).")
 
