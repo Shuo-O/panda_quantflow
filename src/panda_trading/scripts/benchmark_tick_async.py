@@ -172,8 +172,9 @@ def build_spi(queue_size: int) -> MdSpi:
     # 替换慢操作为轻量统计
     async_stats = {"count": 0}
 
-    def fake_publish_kafka(bar):
-        async_stats["count"] += 1
+    def fake_publish_kafka(payload):
+        if payload:
+            async_stats["count"] += 1
 
     spi._publish_kafka_tick = fake_publish_kafka
     spi._publish_questdb_tick = lambda bar: None

@@ -4,7 +4,6 @@
 # @Author : wlb
 # @File   : ctp_mdu_quo.py
 # @desc   :
-import json
 import os
 import tempfile
 import threading
@@ -17,7 +16,14 @@ import logging
 from datetime import datetime
 from queue import Empty, Full, Queue
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from typing import Optional
+from typing import Optional, Tuple
+
+try:
+    import msgpack
+except ImportError as exc:
+    raise RuntimeError(
+        "msgpack 未安装，无法使用高性能行情序列化。请先执行 `pip install msgpack`。"
+    ) from exc
 
 from common.config.config import config, get_config
 from panda_backtest.backtest_common.data.future.future_info_map import FutureInfoMap
@@ -70,7 +76,7 @@ class MdSpi(ctp.CThostFtdcMdSpi):
         self._init_kafka()
         # 队列用于异步处理慢速落地任务（Kafka/QuestDB/ClickHouse）
         queue_size = int(os.getenv("TICK_ASYNC_QUEUE_SIZE", "5000"))
-        self._async_queue: Queue[BarQuotationData] = Queue(maxsize=queue_size)
+        self._async_queue: Queue[Tuple[BarQuotationData, bytes]] = Queue(maxsize=queue_size)
         self._async_stop_event = threading.Event()
         self._async_queue_warned = False
         self._async_worker = threading.Thread(
@@ -105,11 +111,10 @@ class MdSpi(ctp.CThostFtdcMdSpi):
             self._kafka_factory = None
             self._kafka_producer = None
 
-    def _publish_kafka_tick(self, bar_quotation_data: BarQuotationData) -> None:
-        if not self._kafka_producer:
+    def _publish_kafka_tick(self, payload: bytes) -> None:
+        if not self._kafka_producer or not payload:
             return
         try:
-            payload = json.dumps(bar_quotation_data.__dict__).encode("utf-8")
             self._kafka_producer.send(self._kafka_future_tick_topic, payload)
         except Exception as exc:
             if not self._kafka_error_logged:
@@ -235,13 +240,13 @@ class MdSpi(ctp.CThostFtdcMdSpi):
             if bar_quotation_data is None:
                 return
             key = bar_quotation_data.symbol
-            payload = json.dumps(bar_quotation_data.__dict__)
+            payload = self._serialize_bar(bar_quotation_data)
             self.__redis_client.setHashRedis(
                 'tushare_future_tick_quotation',
                 key,
                 payload,
             )
-            self._enqueue_async_task(bar_quotation_data)
+            self._enqueue_async_task(bar_quotation_data, payload)
         except Exception as e:
             mes = traceback.format_exc()
             self.logger.exception("保存行情数据异常: %s", mes)
@@ -306,11 +311,15 @@ class MdSpi(ctp.CThostFtdcMdSpi):
             self.logger.exception('depth_market_dat_to_symbol异常：%s', mes)
             return None
 
-    def _enqueue_async_task(self, bar_data: BarQuotationData) -> None:
+    @staticmethod
+    def _serialize_bar(bar_data: BarQuotationData) -> bytes:
+        return msgpack.packb(bar_data.__dict__, use_bin_type=True)
+
+    def _enqueue_async_task(self, bar_data: BarQuotationData, payload: bytes) -> None:
         if not bar_data or not bar_data.symbol:
             return
         try:
-            self._async_queue.put_nowait(bar_data)
+            self._async_queue.put_nowait((bar_data, payload))
         except Full:
             if not self._async_queue_warned:
                 self.logger.warning(
@@ -322,11 +331,11 @@ class MdSpi(ctp.CThostFtdcMdSpi):
     def _consume_async_tasks(self) -> None:
         while not self._async_stop_event.is_set():
             try:
-                bar = self._async_queue.get(timeout=0.5)
+                bar, payload = self._async_queue.get(timeout=0.5)
             except Empty:
                 continue
             try:
-                self._publish_kafka_tick(bar)
+                self._publish_kafka_tick(payload)
                 self._publish_questdb_tick(bar)
             except Exception as exc:
                 self.logger.error("异步写入行情失败: %s", exc, exc_info=True)

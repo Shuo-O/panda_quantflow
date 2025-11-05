@@ -5,6 +5,13 @@ import traceback
 import logging
 from typing import Any, Dict, Optional
 
+try:
+    import msgpack
+except ImportError as exc:
+    raise RuntimeError(
+        "msgpack 未安装，无法解析高性能行情序列化格式。请先执行 `pip install msgpack`。"
+    ) from exc
+
 from common.config.config import get_config
 from common.connector.kafka_client import KafkaClientFactory, KafkaSettings
 from common.connector.questdb_client import QuestDBClient
@@ -60,12 +67,13 @@ class TushareFutureTickQuotation(object):
             if kafka_bar:
                 return kafka_bar
 
-            bar_data_json = self.redis_client.getHashRedis(
+            bar_data_blob = self.redis_client.getHashRedis(
                 self.tushare_quotation_key, str.encode(item)
             )
-            if bar_data_json:
-                bar_data = json.loads(bar_data_json)
-                return self._dict_to_bar(bar_data) or BarQuotationData()
+            if bar_data_blob:
+                bar_data = self._decode_payload(bar_data_blob)
+                if bar_data:
+                    return self._dict_to_bar(bar_data) or BarQuotationData()
 
             return BarQuotationData()
         except Exception:
@@ -86,7 +94,7 @@ class TushareFutureTickQuotation(object):
             self._kafka_consumer = self._kafka_factory.create_consumer(
                 topic=self._kafka_topic,
                 group_id=self._kafka_group_id,
-                value_deserializer=lambda value: json.loads(value.decode("utf-8")),
+                value_deserializer=None,
                 enable_auto_commit=True,
                 auto_offset_reset=self._kafka_offset_reset,
             )
@@ -121,7 +129,11 @@ class TushareFutureTickQuotation(object):
             if not payload:
                 continue
 
-            bar = self._dict_to_bar(payload)
+            body = self._decode_payload(payload)
+            if not body:
+                continue
+
+            bar = self._dict_to_bar(body)
             if bar and bar.symbol:
                 with self._kafka_cache_lock:
                     self._kafka_cache[bar.symbol] = bar
@@ -164,6 +176,22 @@ class TushareFutureTickQuotation(object):
         if bar is None:
             return self._get_last_from_questdb(symbol)
         return bar
+
+    @staticmethod
+    def _decode_payload(data: Any) -> Optional[Dict[str, Any]]:
+        if data is None:
+            return None
+        if isinstance(data, memoryview):
+            data = data.tobytes()
+        try:
+            return msgpack.unpackb(data, raw=False)
+        except Exception:
+            try:
+                if isinstance(data, bytes):
+                    data = data.decode("utf-8")
+                return json.loads(data)
+            except Exception:
+                return None
 
     def _get_last_from_questdb(self, symbol: str) -> Optional[BarQuotationData]:
         if not self._questdb_client:
