@@ -15,6 +15,7 @@ import time
 import traceback
 import logging
 from datetime import datetime
+from queue import Empty, Full, Queue
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from typing import Optional
 
@@ -67,6 +68,17 @@ class MdSpi(ctp.CThostFtdcMdSpi):
         self._questdb_client = QuestDBClient.instance()
         self._clickhouse_client = ClickHouseClient.instance()
         self._init_kafka()
+        # 队列用于异步处理慢速落地任务（Kafka/QuestDB/ClickHouse）
+        queue_size = int(os.getenv("TICK_ASYNC_QUEUE_SIZE", "5000"))
+        self._async_queue: Queue[BarQuotationData] = Queue(maxsize=queue_size)
+        self._async_stop_event = threading.Event()
+        self._async_queue_warned = False
+        self._async_worker = threading.Thread(
+            target=self._consume_async_tasks,
+            name="TickAsyncWriter",
+            daemon=True,
+        )
+        self._async_worker.start()
 
     @staticmethod
     def _get_config_value(key: str, default: str) -> str:
@@ -218,14 +230,18 @@ class MdSpi(ctp.CThostFtdcMdSpi):
             if tick_data is None:
                 self.logger.warning('行情推送数据为空')
                 return
+            # 实时链路仅负责生成行情快照并写入 Redis，其他慢操作交给异步线程处理
             bar_quotation_data = self.depth_market_dat_to_symbol(tick_data)
             if bar_quotation_data is None:
                 return
             key = bar_quotation_data.symbol
-            self.__redis_client.setHashRedis('tushare_future_tick_quotation', key,
-                                             json.dumps(bar_quotation_data.__dict__))
-            self._publish_kafka_tick(bar_quotation_data)
-            self._publish_questdb_tick(bar_quotation_data)
+            payload = json.dumps(bar_quotation_data.__dict__)
+            self.__redis_client.setHashRedis(
+                'tushare_future_tick_quotation',
+                key,
+                payload,
+            )
+            self._enqueue_async_task(bar_quotation_data)
         except Exception as e:
             mes = traceback.format_exc()
             self.logger.exception("保存行情数据异常: %s", mes)
@@ -260,7 +276,6 @@ class MdSpi(ctp.CThostFtdcMdSpi):
             bar_quotation_data.bidprice1 = tick_data.BidPrice1
             bar_quotation_data.askvolume1 = tick_data.AskVolume1
             bar_quotation_data.bidvolume1 = tick_data.BidVolume1
-            print(f"bar_quotation_data.symbol {bar_quotation_data.symbol}")
             parts = bar_quotation_data.symbol.split('.')
             if len(parts) >= 2:
                 exchange = parts[1]
@@ -291,7 +306,40 @@ class MdSpi(ctp.CThostFtdcMdSpi):
             self.logger.exception('depth_market_dat_to_symbol异常：%s', mes)
             return None
 
+    def _enqueue_async_task(self, bar_data: BarQuotationData) -> None:
+        if not bar_data or not bar_data.symbol:
+            return
+        try:
+            self._async_queue.put_nowait(bar_data)
+        except Full:
+            if not self._async_queue_warned:
+                self.logger.warning(
+                    "Tick 异步队列已满，后续行情将丢弃，当前 symbol=%s",
+                    bar_data.symbol,
+                )
+                self._async_queue_warned = True
+
+    def _consume_async_tasks(self) -> None:
+        while not self._async_stop_event.is_set():
+            try:
+                bar = self._async_queue.get(timeout=0.5)
+            except Empty:
+                continue
+            try:
+                self._publish_kafka_tick(bar)
+                self._publish_questdb_tick(bar)
+            except Exception as exc:
+                self.logger.error("异步写入行情失败: %s", exc, exc_info=True)
+            finally:
+                self._async_queue.task_done()
+
     def __del__(self):
+        try:
+            self._async_stop_event.set()
+            if self._async_worker and self._async_worker.is_alive():
+                self._async_worker.join(timeout=1.0)
+        except Exception:
+            pass
         self.api.RegisterSpi(None)
         self.api.Release()
 
