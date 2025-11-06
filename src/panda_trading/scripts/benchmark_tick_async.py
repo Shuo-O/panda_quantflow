@@ -153,6 +153,35 @@ class FakeRedis:
         self.store[(key, field)] = value
         self.calls += 1
         self.total_time += time.perf_counter() - start
+        return True
+
+    @property
+    def client(self):
+        return self
+
+    # Pipeline fallback
+    def pipeline(self, transaction: bool = False):
+        return FakePipeline(self)
+
+    def hset(self, name, key, value):
+        self.setHashRedis(name, key, value)
+        return True
+
+
+class FakePipeline:
+    def __init__(self, client: FakeRedis):
+        self.client = client
+        self.commands = []
+
+    def hset(self, name, key, value):
+        self.commands.append((name, key, value))
+        return self
+
+    def execute(self):
+        for name, key, value in self.commands:
+            self.client.hset(name, key, value)
+        self.commands.clear()
+        return True
 
 
 def build_spi(queue_size: int) -> MdSpi:
@@ -161,8 +190,11 @@ def build_spi(queue_size: int) -> MdSpi:
     spi.logger.setLevel(logging.INFO)
     spi._MdSpi__redis_client = FakeRedis()
     spi._async_queue = Queue(maxsize=queue_size)
+    spi._redis_queue = Queue(maxsize=queue_size)
     spi._async_stop_event = threading.Event()
+    spi._redis_stop_event = threading.Event()
     spi._async_queue_warned = False
+    spi._redis_queue_warned = False
     spi._questdb_client = None
     spi._clickhouse_client = None
     spi._kafka_error_logged = False
@@ -184,12 +216,23 @@ def build_spi(queue_size: int) -> MdSpi:
 
     spi.api = SimpleNamespace(RegisterSpi=lambda _: None, Release=lambda: None)
 
+    spi._redis_flush_batch = 200
+    spi._redis_flush_interval = 0.001
+    spi._redis_support_pipeline = True
+    spi._redis_last_flush = time.time()
+
     spi._async_worker = threading.Thread(
         target=spi._consume_async_tasks,
         name="BenchmarkAsyncWorker",
         daemon=True,
     )
     spi._async_worker.start()
+    spi._redis_worker = threading.Thread(
+        target=spi._redis_flush_loop,
+        name="BenchmarkRedisWriter",
+        daemon=True,
+    )
+    spi._redis_worker.start()
     spi._async_stats = async_stats
     return spi
 
@@ -217,9 +260,15 @@ def run_benchmark(tick_count: int, queue_size: int):
         spi.save_data_task(bar)
     # 等待异步队列清空
     spi._async_queue.join()
+    spi._redis_queue.join()
     total = time.perf_counter() - start
 
     redis_client: FakeRedis = spi._MdSpi__redis_client
+
+    spi._async_stop_event.set()
+    spi._redis_stop_event.set()
+    spi._async_worker.join(timeout=1.0)
+    spi._redis_worker.join(timeout=1.0)
 
     # 关闭后台线程
     spi._async_stop_event.set()

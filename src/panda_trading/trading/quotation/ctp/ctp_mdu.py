@@ -16,7 +16,7 @@ import logging
 from datetime import datetime
 from queue import Empty, Full, Queue
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 try:
     import msgpack
@@ -77,6 +77,10 @@ class MdSpi(ctp.CThostFtdcMdSpi):
         # 队列用于异步处理慢速落地任务（Kafka/QuestDB/ClickHouse）
         queue_size = int(os.getenv("TICK_ASYNC_QUEUE_SIZE", "5000"))
         self._async_queue: Queue[Tuple[BarQuotationData, bytes]] = Queue(maxsize=queue_size)
+        redis_queue_size = int(os.getenv("TICK_REDIS_QUEUE_SIZE", "10000"))
+        self._redis_queue: Queue[Tuple[str, bytes]] = Queue(maxsize=redis_queue_size)
+        self._redis_flush_batch = int(os.getenv("TICK_REDIS_FLUSH_BATCH", "200"))
+        self._redis_flush_interval = float(os.getenv("TICK_REDIS_FLUSH_INTERVAL_MS", "5")) / 1000.0
         self._async_stop_event = threading.Event()
         self._async_queue_warned = False
         self._async_worker = threading.Thread(
@@ -85,6 +89,18 @@ class MdSpi(ctp.CThostFtdcMdSpi):
             daemon=True,
         )
         self._async_worker.start()
+        self._redis_queue_warned = False
+        self._redis_stop_event = threading.Event()
+        self._redis_last_flush = time.time()
+        self._redis_worker = threading.Thread(
+            target=self._redis_flush_loop,
+            name="TickRedisWriter",
+            daemon=True,
+        )
+        self._redis_worker.start()
+        self._redis_support_pipeline = hasattr(self.__redis_client, "client") and hasattr(
+            self.__redis_client.client, "pipeline"
+        )
 
     @staticmethod
     def _get_config_value(key: str, default: str) -> str:
@@ -241,11 +257,7 @@ class MdSpi(ctp.CThostFtdcMdSpi):
                 return
             key = bar_quotation_data.symbol
             payload = self._serialize_bar(bar_quotation_data)
-            self.__redis_client.setHashRedis(
-                'tushare_future_tick_quotation',
-                key,
-                payload,
-            )
+            self._enqueue_redis_update(key, payload)
             self._enqueue_async_task(bar_quotation_data, payload)
         except Exception as e:
             mes = traceback.format_exc()
@@ -328,6 +340,58 @@ class MdSpi(ctp.CThostFtdcMdSpi):
                 )
                 self._async_queue_warned = True
 
+    def _enqueue_redis_update(self, symbol: str, payload: bytes) -> None:
+        if not symbol:
+            return
+        try:
+            self._redis_queue.put_nowait((symbol, payload))
+        except Full:
+            if not self._redis_queue_warned:
+                self.logger.warning("Redis 队列已满，跳过行情写入，symbol=%s", symbol)
+                self._redis_queue_warned = True
+
+    def _redis_flush_loop(self) -> None:
+        cache: Dict[str, bytes] = {}
+        while not self._redis_stop_event.is_set() or not self._redis_queue.empty():
+            flushed = False
+            try:
+                symbol, payload = self._redis_queue.get(timeout=0.001)
+                cache[symbol] = payload
+                self._redis_queue.task_done()
+            except Empty:
+                pass
+
+            now = time.time()
+            if cache and (
+                len(cache) >= self._redis_flush_batch
+                or (now - self._redis_last_flush) >= self._redis_flush_interval
+            ):
+                self._flush_redis_batch(cache)
+                cache.clear()
+                self._redis_last_flush = now
+                flushed = True
+
+            if flushed:
+                continue
+
+        if cache:
+            self._flush_redis_batch(cache)
+
+    def _flush_redis_batch(self, data: Dict[str, bytes]) -> None:
+        if not data:
+            return
+        try:
+            if self._redis_support_pipeline:
+                pipeline = self.__redis_client.client.pipeline(transaction=False)
+                for symbol, payload in data.items():
+                    pipeline.hset('tushare_future_tick_quotation', symbol, payload)
+                pipeline.execute()
+            else:
+                for symbol, payload in data.items():
+                    self.__redis_client.setHashRedis('tushare_future_tick_quotation', symbol, payload)
+        except Exception as exc:
+            self.logger.error("批量写入 Redis 失败: %s", exc, exc_info=True)
+
     def _consume_async_tasks(self) -> None:
         while not self._async_stop_event.is_set():
             try:
@@ -347,6 +411,9 @@ class MdSpi(ctp.CThostFtdcMdSpi):
             self._async_stop_event.set()
             if self._async_worker and self._async_worker.is_alive():
                 self._async_worker.join(timeout=1.0)
+            self._redis_stop_event.set()
+            if self._redis_worker and self._redis_worker.is_alive():
+                self._redis_worker.join(timeout=1.0)
         except Exception:
             pass
         self.api.RegisterSpi(None)
