@@ -15,15 +15,10 @@ import traceback
 import logging
 from datetime import datetime
 from queue import Empty, Full, Queue
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
-try:
-    import msgpack
-except ImportError as exc:
-    raise RuntimeError(
-        "msgpack 未安装，无法使用高性能行情序列化。请先执行 `pip install msgpack`。"
-    ) from exc
+import msgpack
+
 
 from common.config.config import config, get_config
 from panda_backtest.backtest_common.data.future.future_info_map import FutureInfoMap
@@ -57,13 +52,10 @@ class MdSpi(ctp.CThostFtdcMdSpi):
         self.api = self.create()
 
         # 业务字段值
-        self.future_code_list = list()
         self.__redis_client = RedisClient()
-        self.__thread_pool_executor = ThreadPoolExecutor(max_workers=40)
         self.future_info_map = FutureInfoMap(MongoClient(config).get_mongo_db())
         self.now_trade_date_tuple = (datetime.now().strftime('%Y%m%d'),
                                      DateUtil.get_next_trade_date(datetime.now().strftime('%Y%m%d')))
-        self.executor = ThreadPoolExecutor(max_workers=10)
         self._kafka_factory: Optional[KafkaClientFactory] = None
         self._kafka_producer = None
         self._kafka_future_tick_topic = self._get_config_value(
@@ -73,22 +65,72 @@ class MdSpi(ctp.CThostFtdcMdSpi):
         self._kafka_ready_logged = False
         self._questdb_client = QuestDBClient.instance()
         self._clickhouse_client = ClickHouseClient.instance()
+        self._enable_kafka = self._get_bool_config("ENABLE_KAFKA_TICK", True)
+        self._enable_questdb = self._get_bool_config("ENABLE_QUESTDB_TICK", True)
+        self._enable_clickhouse = self._get_bool_config("ENABLE_CLICKHOUSE_TICK", True)
         self._init_kafka()
+
+        
         # 队列用于异步处理慢速落地任务（Kafka/QuestDB/ClickHouse）
-        queue_size = int(os.getenv("TICK_ASYNC_QUEUE_SIZE", "5000"))
-        self._async_queue: Queue[Tuple[BarQuotationData, bytes]] = Queue(maxsize=queue_size)
+        parse_queue_size = int(os.getenv("TICK_PARSE_QUEUE_SIZE", os.getenv("TICK_ASYNC_QUEUE_SIZE", "5000")))
+        self._tick_queue: Queue[Dict[str, Any]] = Queue(maxsize=parse_queue_size)
+        kafka_queue_size = int(os.getenv("TICK_KAFKA_QUEUE_SIZE", "5000"))
+        questdb_queue_size = int(os.getenv("TICK_QUESTDB_QUEUE_SIZE", "5000"))
+        clickhouse_queue_size = int(os.getenv("TICK_CLICKHOUSE_QUEUE_SIZE", "5000"))
         redis_queue_size = int(os.getenv("TICK_REDIS_QUEUE_SIZE", "10000"))
         self._redis_queue: Queue[Tuple[str, bytes]] = Queue(maxsize=redis_queue_size)
         self._redis_flush_batch = int(os.getenv("TICK_REDIS_FLUSH_BATCH", "200"))
         self._redis_flush_interval = float(os.getenv("TICK_REDIS_FLUSH_INTERVAL_MS", "5")) / 1000.0
-        self._async_stop_event = threading.Event()
-        self._async_queue_warned = False
-        self._async_worker = threading.Thread(
-            target=self._consume_async_tasks,
-            name="TickAsyncWriter",
+        self._tick_stop_event = threading.Event()
+        self._tick_queue_warned = False
+        self._tick_worker = threading.Thread(
+            target=self._tick_dispatch_loop,
+            name="TickDispatch",
             daemon=True,
         )
-        self._async_worker.start()
+        self._tick_worker.start()
+        self._kafka_queue_warned = False
+        self._questdb_queue_warned = False
+        self._clickhouse_queue_warned = False
+        if self._enable_kafka:
+            self._kafka_queue: Queue[bytes] = Queue(maxsize=kafka_queue_size)
+            self._kafka_stop_event = threading.Event()
+            self._kafka_worker = threading.Thread(
+                target=self._consume_kafka_queue,
+                name="TickKafkaWriter",
+                daemon=True,
+            )
+            self._kafka_worker.start()
+        else:
+            self._kafka_queue = None
+            self._kafka_stop_event = None
+            self._kafka_worker = None
+        if self._enable_questdb:
+            self._questdb_queue: Queue[BarQuotationData] = Queue(maxsize=questdb_queue_size)
+            self._questdb_stop_event = threading.Event()
+            self._questdb_worker = threading.Thread(
+                target=self._consume_questdb_queue,
+                name="TickQuestDBWriter",
+                daemon=True,
+            )
+            self._questdb_worker.start()
+        else:
+            self._questdb_queue = None
+            self._questdb_stop_event = None
+            self._questdb_worker = None
+        if self._enable_clickhouse:
+            self._clickhouse_queue: Queue[BarQuotationData] = Queue(maxsize=clickhouse_queue_size)
+            self._clickhouse_stop_event = threading.Event()
+            self._clickhouse_worker = threading.Thread(
+                target=self._consume_clickhouse_queue,
+                name="TickClickHouseWriter",
+                daemon=True,
+            )
+            self._clickhouse_worker.start()
+        else:
+            self._clickhouse_queue = None
+            self._clickhouse_stop_event = None
+            self._clickhouse_worker = None
         self._redis_queue_warned = False
         self._redis_stop_event = threading.Event()
         self._redis_last_flush = time.time()
@@ -106,6 +148,12 @@ class MdSpi(ctp.CThostFtdcMdSpi):
     def _get_config_value(key: str, default: str) -> str:
         cfg = get_config()
         return os.getenv(key, cfg.get(key, default))
+
+    def _get_bool_config(self, key: str, default: bool) -> bool:
+        raw_value = self._get_config_value(key, str(default))
+        if isinstance(raw_value, bool):
+            return raw_value
+        return str(raw_value).strip().lower() in {"1", "true", "yes", "on"}
 
     def _init_kafka(self):
         try:
@@ -160,7 +208,6 @@ class MdSpi(ctp.CThostFtdcMdSpi):
             self._questdb_client.write_tick(bar_quotation_data.symbol, fields, timestamp_ns)
         except Exception as exc:
             self.logger.debug("[QuestDB] 写入失败: %s", exc)
-        self._publish_clickhouse_tick(bar_quotation_data)
 
     def _publish_clickhouse_tick(self, bar_quotation_data: BarQuotationData) -> None:
         if not self._clickhouse_client or not bar_quotation_data.symbol:
@@ -187,6 +234,136 @@ class MdSpi(ctp.CThostFtdcMdSpi):
             self._clickhouse_client.write_tick(row)
         except Exception as exc:
             self.logger.debug("[ClickHouse] 写入失败: %s", exc)
+
+    def _try_put_queue(
+        self,
+        queue_obj: Queue,
+        item: Any,
+        warn_attr: str,
+        warn_template: str,
+        symbol: Optional[str] = None,
+    ) -> None:
+        if queue_obj is None:
+            return
+        try:
+            queue_obj.put_nowait(item)
+        except Full:
+            if not getattr(self, warn_attr):
+                self.logger.warning(warn_template, symbol)
+                setattr(self, warn_attr, True)
+
+    def _snapshot_tick(self, tick: "CThostFtdcDepthMarketDataField") -> Optional[Dict[str, Any]]:
+        try:
+            return {
+                "InstrumentID": tick.InstrumentID,
+                "UpdateTime": tick.UpdateTime,
+                "TradingDay": tick.TradingDay,
+                "OpenPrice": tick.OpenPrice,
+                "HighestPrice": tick.HighestPrice,
+                "LowestPrice": tick.LowestPrice,
+                "ClosePrice": tick.ClosePrice,
+                "Volume": tick.Volume,
+                "OpenInterest": tick.OpenInterest,
+                "Turnover": tick.Turnover,
+                "SettlementPrice": tick.SettlementPrice,
+                "LastPrice": tick.LastPrice,
+                "PreClosePrice": tick.PreClosePrice,
+                "UpperLimitPrice": tick.UpperLimitPrice,
+                "LowerLimitPrice": tick.LowerLimitPrice,
+                "AskPrice1": tick.AskPrice1,
+                "BidPrice1": tick.BidPrice1,
+                "AskVolume1": tick.AskVolume1,
+                "BidVolume1": tick.BidVolume1,
+            }
+        except Exception as exc:
+            self.logger.debug("行情快照复制失败: %s", exc, exc_info=True)
+            return None
+
+    def _enqueue_tick(self, tick_snapshot: Dict[str, Any]) -> None:
+        try:
+            self._tick_queue.put_nowait(tick_snapshot)
+        except Full:
+            if not self._tick_queue_warned:
+                self.logger.warning("实时行情解析队列已满，丢弃行情")
+                self._tick_queue_warned = True
+
+    def _tick_dispatch_loop(self) -> None:
+        while not self._tick_stop_event.is_set():
+            try:
+                tick_snapshot = self._tick_queue.get(timeout=0.5)
+            except Empty:
+                continue
+            try:
+                self.save_data_task(tick_snapshot)
+            except Exception as exc:
+                self.logger.error("处理行情快照失败: %s", exc, exc_info=True)
+            finally:
+                self._tick_queue.task_done()
+
+    def _dispatch_backends(self, bar_data: BarQuotationData, payload: bytes) -> None:
+        if self._enable_kafka and self._kafka_queue is not None:
+            self._try_put_queue(
+                self._kafka_queue,
+                payload,
+                "_kafka_queue_warned",
+                "Kafka 队列已满，跳过行情，symbol=%s",
+                bar_data.symbol,
+            )
+        if self._enable_questdb and self._questdb_queue is not None:
+            self._try_put_queue(
+                self._questdb_queue,
+                bar_data,
+                "_questdb_queue_warned",
+                "QuestDB 队列已满，跳过行情，symbol=%s",
+                bar_data.symbol,
+            )
+        if self._enable_clickhouse and self._clickhouse_queue is not None:
+            self._try_put_queue(
+                self._clickhouse_queue,
+                bar_data,
+                "_clickhouse_queue_warned",
+                "ClickHouse 队列已满，跳过行情，symbol=%s",
+                bar_data.symbol,
+            )
+
+    def _consume_kafka_queue(self) -> None:
+        while not self._kafka_stop_event.is_set():
+            try:
+                payload = self._kafka_queue.get(timeout=0.5)
+            except Empty:
+                continue
+            try:
+                self._publish_kafka_tick(payload)
+            except Exception as exc:
+                self.logger.error("Kafka 写入失败: %s", exc, exc_info=True)
+            finally:
+                self._kafka_queue.task_done()
+
+    def _consume_questdb_queue(self) -> None:
+        while not self._questdb_stop_event.is_set():
+            try:
+                bar = self._questdb_queue.get(timeout=0.5)
+            except Empty:
+                continue
+            try:
+                self._publish_questdb_tick(bar)
+            except Exception as exc:
+                self.logger.error("QuestDB 写入失败: %s", exc, exc_info=True)
+            finally:
+                self._questdb_queue.task_done()
+
+    def _consume_clickhouse_queue(self) -> None:
+        while not self._clickhouse_stop_event.is_set():
+            try:
+                bar = self._clickhouse_queue.get(timeout=0.5)
+            except Empty:
+                continue
+            try:
+                self._publish_clickhouse_tick(bar)
+            except Exception as exc:
+                self.logger.error("ClickHouse 写入失败: %s", exc, exc_info=True)
+            finally:
+                self._clickhouse_queue.task_done()
 
     def create(self):
         dir = ''.join(('ctp', self.broker_id, self.user_id)).encode('UTF-8')
@@ -240,59 +417,59 @@ class MdSpi(ctp.CThostFtdcMdSpi):
         )
         self.data = pDepthMarketData
         # self.save_data_task(pDepthMarketData)
-        try:
-            self.executor.submit(self.save_data_task, pDepthMarketData)
-        except Exception as e:
-            self.logger.exception("行情推送任务提交失败: %s", e)
+        snapshot = self._snapshot_tick(pDepthMarketData)
+        if snapshot:
+            self._enqueue_tick(snapshot)
 
 
-    def save_data_task(self, tick_data):
+    def save_data_task(self, tick_snapshot: Dict[str, Any]) -> None:
         try:
-            if tick_data is None:
+            if tick_snapshot is None:
                 self.logger.warning('行情推送数据为空')
                 return
             # 实时链路仅负责生成行情快照并写入 Redis，其他慢操作交给异步线程处理
-            bar_quotation_data = self.depth_market_dat_to_symbol(tick_data)
+            bar_quotation_data = self.depth_market_dat_to_symbol(tick_snapshot)
             if bar_quotation_data is None:
                 return
             key = bar_quotation_data.symbol
             payload = self._serialize_bar(bar_quotation_data)
             self._enqueue_redis_update(key, payload)
-            self._enqueue_async_task(bar_quotation_data, payload)
+            self._dispatch_backends(bar_quotation_data, payload)
         except Exception as e:
             mes = traceback.format_exc()
             self.logger.exception("保存行情数据异常: %s", mes)
 
-    def depth_market_dat_to_symbol(self, tick_data):
+    def depth_market_dat_to_symbol(self, tick_data: Dict[str, Any]):
         try:
             bar_quotation_data = BarQuotationData()
-            symbol_info = self.future_info_map.get_by_ctp_code(tick_data.InstrumentID)
+            instrument_id = (tick_data.get("InstrumentID") or "").strip()
+            symbol_info = self.future_info_map.get_by_ctp_code(instrument_id)
             if symbol_info:
                 bar_quotation_data.symbol = symbol_info['symbol']
             else:
-                bar_quotation_data.symbol = tick_data.InstrumentID
+                bar_quotation_data.symbol = instrument_id
             # bar_quotation_data.code = bar_data['code']
             bar_quotation_data.date = datetime.now().strftime('%Y%m%d')
-            bar_quotation_data.time = tick_data.UpdateTime
-            bar_quotation_data.trade_date = tick_data.TradingDay
-            bar_quotation_data.open = tick_data.OpenPrice
-            bar_quotation_data.high = tick_data.HighestPrice
-            bar_quotation_data.low = tick_data.LowestPrice
-            bar_quotation_data.close = tick_data.ClosePrice
-            bar_quotation_data.volume = tick_data.Volume
-            bar_quotation_data.oi = tick_data.OpenInterest
-            bar_quotation_data.turnover = tick_data.Turnover
+            bar_quotation_data.time = tick_data.get("UpdateTime")
+            bar_quotation_data.trade_date = tick_data.get("TradingDay")
+            bar_quotation_data.open = tick_data.get("OpenPrice")
+            bar_quotation_data.high = tick_data.get("HighestPrice")
+            bar_quotation_data.low = tick_data.get("LowestPrice")
+            bar_quotation_data.close = tick_data.get("ClosePrice")
+            bar_quotation_data.volume = tick_data.get("Volume")
+            bar_quotation_data.oi = tick_data.get("OpenInterest")
+            bar_quotation_data.turnover = tick_data.get("Turnover")
             # bar_quotation_data.vwap = bar_data['vwap']
             # bar_quotation_data.oi = bar_data['oi']
-            bar_quotation_data.settle = tick_data.SettlementPrice
-            bar_quotation_data.last = tick_data.LastPrice
-            bar_quotation_data.preclose = tick_data.PreClosePrice
-            bar_quotation_data.limit_up = tick_data.UpperLimitPrice
-            bar_quotation_data.limit_down = tick_data.LowerLimitPrice
-            bar_quotation_data.askprice1 = tick_data.AskPrice1
-            bar_quotation_data.bidprice1 = tick_data.BidPrice1
-            bar_quotation_data.askvolume1 = tick_data.AskVolume1
-            bar_quotation_data.bidvolume1 = tick_data.BidVolume1
+            bar_quotation_data.settle = tick_data.get("SettlementPrice")
+            bar_quotation_data.last = tick_data.get("LastPrice")
+            bar_quotation_data.preclose = tick_data.get("PreClosePrice")
+            bar_quotation_data.limit_up = tick_data.get("UpperLimitPrice")
+            bar_quotation_data.limit_down = tick_data.get("LowerLimitPrice")
+            bar_quotation_data.askprice1 = tick_data.get("AskPrice1")
+            bar_quotation_data.bidprice1 = tick_data.get("BidPrice1")
+            bar_quotation_data.askvolume1 = tick_data.get("AskVolume1")
+            bar_quotation_data.bidvolume1 = tick_data.get("BidVolume1")
             parts = bar_quotation_data.symbol.split('.')
             if len(parts) >= 2:
                 exchange = parts[1]
@@ -326,19 +503,6 @@ class MdSpi(ctp.CThostFtdcMdSpi):
     @staticmethod
     def _serialize_bar(bar_data: BarQuotationData) -> bytes:
         return msgpack.packb(bar_data.__dict__, use_bin_type=True)
-
-    def _enqueue_async_task(self, bar_data: BarQuotationData, payload: bytes) -> None:
-        if not bar_data or not bar_data.symbol:
-            return
-        try:
-            self._async_queue.put_nowait((bar_data, payload))
-        except Full:
-            if not self._async_queue_warned:
-                self.logger.warning(
-                    "Tick 异步队列已满，后续行情将丢弃，当前 symbol=%s",
-                    bar_data.symbol,
-                )
-                self._async_queue_warned = True
 
     def _enqueue_redis_update(self, symbol: str, payload: bytes) -> None:
         if not symbol:
@@ -392,25 +556,23 @@ class MdSpi(ctp.CThostFtdcMdSpi):
         except Exception as exc:
             self.logger.error("批量写入 Redis 失败: %s", exc, exc_info=True)
 
-    def _consume_async_tasks(self) -> None:
-        while not self._async_stop_event.is_set():
-            try:
-                bar, payload = self._async_queue.get(timeout=0.5)
-            except Empty:
-                continue
-            try:
-                self._publish_kafka_tick(payload)
-                self._publish_questdb_tick(bar)
-            except Exception as exc:
-                self.logger.error("异步写入行情失败: %s", exc, exc_info=True)
-            finally:
-                self._async_queue.task_done()
-
     def __del__(self):
         try:
-            self._async_stop_event.set()
-            if self._async_worker and self._async_worker.is_alive():
-                self._async_worker.join(timeout=1.0)
+            self._tick_stop_event.set()
+            if hasattr(self, "_tick_worker") and self._tick_worker and self._tick_worker.is_alive():
+                self._tick_worker.join(timeout=1.0)
+            if self._enable_kafka and self._kafka_stop_event:
+                self._kafka_stop_event.set()
+                if self._kafka_worker and self._kafka_worker.is_alive():
+                    self._kafka_worker.join(timeout=1.0)
+            if self._enable_questdb and self._questdb_stop_event:
+                self._questdb_stop_event.set()
+                if self._questdb_worker and self._questdb_worker.is_alive():
+                    self._questdb_worker.join(timeout=1.0)
+            if self._enable_clickhouse and self._clickhouse_stop_event:
+                self._clickhouse_stop_event.set()
+                if self._clickhouse_worker and self._clickhouse_worker.is_alive():
+                    self._clickhouse_worker.join(timeout=1.0)
             self._redis_stop_event.set()
             if self._redis_worker and self._redis_worker.is_alive():
                 self._redis_worker.join(timeout=1.0)
